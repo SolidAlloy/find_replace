@@ -1,0 +1,232 @@
+#!/usr/bin/env python
+
+"""
+Recursive Find&Replace script with support of unix-like filename patterns.
+
+Arguments
+----------
+--help, -h :
+    shows script and arguments descriptions.
+--regex, -r :
+    switches to the regex mode instead of the literal mode by default.
+path :
+    absolute or relative path to the folder where matched strings
+    should be replaced.
+find_pattern :
+    a pattern to be matched and replaced. It is recommended to embrace it with
+    single quotes. If single quotes are contained in the pattern itself,
+    embrace the pattern with double quotes.
+replace_pattern :
+    a pattern to be put in place of the matched one. Apply the same quotes
+    rules to it as to find_pattern.
+file_patterns :
+    zero, one, or multiple unix-like filename patterns to filter out large
+    files, backups, etc. It is recommended to embrace them with single quotes
+    to avoid the bash auto-replacement described in notes.
+
+Notes
+------
+The script works well with both Python2 and Python3.
+
+
+replace_tests.py is a unittest script to test the module. It must be placed in
+the same folder as "find_replace".
+
+
+Bash auto-replaces filename patterns when they are passed as arguments to the
+script. See the example below:
+
+File structure:
+/
+|_/test_folder
+  |__1.php
+  |__1.html
+|__index.html
+|__test.html
+|__find_replace
+
+find_replace test_folder find found *.php *.html
+
+Bash will auto-replace *.html with ['index.html', 'test.html'] if they are
+located in the same directory where the user currently is, so better embrace
+filename patterns with single quotes:
+
+find_replace test_folder find found '*.php' '*.html'
+
+These file patterns will be passed to the script correctly: ['*.php', '*.html']
+"""
+
+
+from __future__ import print_function
+import os
+import fnmatch
+import re
+import argparse
+import sys
+from fileinput import FileInput
+
+
+class PermissionError(Exception):  # PermissionError can be raised by Python3
+    # but doesn't exist in Python 2
+    pass
+
+
+def parse_args():
+    """
+    Returns an argparse.Namespace object which contains all passed arguments.
+    """
+    parser = argparse.ArgumentParser(
+        description="replace patterns in files recursively")
+    parser.add_argument("--regex", "-r", action="store_true",
+                        help="treat find_pattern as regular expression")
+    parser.add_argument("path", help="relative or absolute path to a folder")
+    parser.add_argument("find_pattern",
+                        help="the pattern you are searching for")
+    parser.add_argument("replace_pattern",
+                        help="the pattern to be in place of the searched one")
+    parser.add_argument("file_patterns", nargs='*',
+                        help="search only files of some type")
+    return parser.parse_args()
+
+
+def print_percent(percent):
+    """Prints dynamicly changing percent number."""
+    percent_str = str(percent)
+    sys.stdout.write(
+        # other, simpler methods don't work via SSH for some reason,
+        # so I had to prepend the output with the \b symbols of the same
+        # number as the length of the output.
+        # {0} is for really old versions of Python
+        '\b'*(11+len(percent_str)) + "Progress: {0}%".format(percent_str))
+    sys.stdout.flush()
+
+
+def get_filtered_files(directory, file_patterns):
+    """
+    Walks through all files in the directory and returns a list of only those
+    files that match any of file patterns.
+    """
+    # The script needs to have a total number of filteres files before doing
+    # the search because it has to show the current process in per cent.
+    # I could implement walking through files as a generator to avoid excessive
+    # memory usage. In this case, the script will need to walk through all
+    # the files again in the find_replace function.
+    # I decided to create a list of files to walk through files only once.
+    # Even with 300,000 files, the list shouldn't take more than ~60 MB in
+    # memory.
+    filtered_files = []
+    for path, dirs, files in os.walk(os.path.abspath(directory)):
+        for filename in files:
+            if any(fnmatch.fnmatch(
+                    filename, pattern) for pattern in file_patterns):
+                filtered_files.append(os.path.join(path, filename))
+    return filtered_files
+
+
+def find_replace(directory, find_pattern, replace_pattern, regex,
+                 file_patterns, testing=False):
+    """
+    Searches through filtered files for matches, replaces them, and returns a
+    tuple of numbers of occurences, skipped, and filtered files.
+
+    Arguments
+    ----------
+    str directory :
+        absolute or relative path to folder containing the files where pattern
+        should be replaced.
+    str find_pattern :
+        pattern to search for in files.
+    str replace_pattern :
+        pattern to be put in place of the searched one.
+    bool regex :
+        True - compile find_pattern as regex pattern.
+        False - don't compile and search for the literal pattern.
+    list file_patterns :
+        Empty list - don't filter and search in all files.
+        Each element of the list should be str and represent unix-like filename
+        pattern.
+    bool testing :
+        True - do not output "Progress: x%"
+        False - output "Progress: x%"
+
+    Return
+    -------
+    Tuple of:
+    int occurence_counter :
+        Number of lines that were changed. If two occurences were replaced on
+        one line, it will be counted as one.
+    int skipped_counter :
+        Number of skipped files because of insufficient permissions.
+    int filtered_total :
+        Number of all the files that matched filename patterns.
+    """
+    occurence_counter = percent = skipped_counter = searched_files_counter = 0
+    if not file_patterns:
+        file_patterns = ['*']
+    filtered_files = get_filtered_files(directory, file_patterns)
+    filtered_total = len(filtered_files)
+    if not testing:
+        print_percent(percent)  # print "Progress: 0%" at start.
+    if regex:
+        find_regex = re.compile(find_pattern)
+    for filepath in filtered_files:
+        searched_files_counter += 1
+        # save original file ownership details in case the script is run under
+        # another user
+        try:
+            stat = os.stat(filepath)
+            uid, gid = stat[4], stat[5]
+        except OSError:  # no such file
+            skipped_counter += 1
+            continue
+        try:
+            for line in FileInput(filepath, inplace=True):
+                if regex:
+                    new_line = find_regex.sub(replace_pattern, line)
+                    print(new_line, end='')
+                else:
+                    new_line = line.replace(
+                        find_pattern, replace_pattern)
+                    print(new_line, end='')
+                if new_line != line:
+                    occurence_counter += 1
+        except (IOError, OSError, UnicodeDecodeError):  # First two are
+            # "permission denied". The last one occurs when fileinput tries to
+            # read a not utf-8 encoded file.
+            skipped_counter += 1
+        # restore original file ownership
+        try:
+            os.chown(filepath, uid, gid)
+        except (PermissionError, OSError):  # Operation not permitted
+            pass  # FileInput wasn't able to change this file too, so it's fine
+        current_percent = int(searched_files_counter * 100 / filtered_total)
+        if current_percent > percent:  # print new percent only when it changes
+            percent = current_percent
+            if not testing:
+                print_percent(percent)
+    return (occurence_counter, skipped_counter, filtered_total)
+
+
+def main():
+    args = parse_args()
+    if not args.file_patterns:
+        print("** Consider using file patterns to speed up the process **\n")
+    occurences, skipped, filtered_total = find_replace(
+        args.path, args.find_pattern, args.replace_pattern, args.regex,
+        args.file_patterns)
+    # {0} is for really old versions of Python
+    print('\n\nOccurences replaced: {0}'.format(occurences))
+    print('Files skipped (Permission denied): {0}'.format(skipped))
+    print('Total files searched: {0}'.format(filtered_total))
+
+
+if __name__ == '__main__':
+    # exit the script without errors in case of ^C
+    try:
+        main()
+    except KeyboardInterrupt:
+        print('\n')
+        try:
+            sys.exit(0)
+        except SystemExit:
+            os._exit(0)
