@@ -51,12 +51,12 @@ script. See the example below:
         |__find_replace
 <br>
 
-        find_replace test_folder find found *.php *.html  
+        find_replace test_folder pattern replacement *.php *.html  
 <br>
     Bash will auto-replace *.html with ['index.html', 'test.html'] if they are
     located in the same directory where the user currently is, so better embrace
     filename patterns with single quotes:
 
-        find_replace test_folder find found '\*.php' '\*.html'
+        find_replace test_folder pattern replacement '*.php' '*.html'
 <br>
-    These file patterns will be passed to the script correctly: ['\*.php', '\*.html']
+    These file patterns will be passed to the script correctly: ['*.php', '*.html']
